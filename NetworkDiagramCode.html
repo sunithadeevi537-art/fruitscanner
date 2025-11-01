@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Multi-Modal Analyzer (Fruit, Network, General)</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom styles for better code display */
+        .prose {
+            max-width: none;
+        }
+        /* Ensure the main container takes full viewport height */
+        #root {
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        /* Custom scrollbar for output area */
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background-color: rgba(107, 114, 128, 0.5); /* gray-500 with opacity */
+            border-radius: 4px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+            background-color: transparent;
+        }
+        /* Style for the video stream */
+        .camera-view {
+            width: 100%;
+            height: 250px;
+            max-height: 50vh;
+            background-color: #000;
+            border-radius: 8px;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        .camera-view video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+    </style>
+    <!-- Set Inter font globally -->
+    <script>
+        tailwind.config = {
+          theme: {
+            extend: {
+              fontFamily: {
+                inter: ['Inter', 'sans-serif'],
+              }
+            }
+          }
+        }
+    </script>
+</head>
+<body class="font-inter">
+    <div id="root"></div>
+
+    <!-- Load React, ReactDOM, and Babel -->
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <!-- Main React Component Code -->
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        // --- API Helper ---
+        async function callGeminiApi(payload, model = 'gemini-2.5-flash-preview-09-2025') {
+          // The API key is set to an empty string to allow the Canvas environment
+          // to automatically provide the key at runtime.
+          const apiKey = "AIzaSyC7GR5nfaDng3NmAghhiOWb4nabEop50Wk"; 
+          
+          // NOTE: The previous explicit check for the placeholder key has been removed
+          // to enable running the code within the environment.
+
+          const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+
+          let retries = 3;
+          let delay = 1000;
+
+          while (retries > 0) {
+            try {
+              const response = await fetch(apiUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+              });
+
+              if (!response.ok) {
+                let errorDetails = `API request failed with status ${response.status}`;
+                try {
+                    const errorJson = await response.json();
+                    errorDetails += ` - ${errorJson.error?.message || response.statusText}`;
+                } catch (e) {
+                    errorDetails += ` - ${response.statusText}`;
+                }
+                throw new Error(errorDetails);
+              }
+
+              const result = await response.json();
+              const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
+
+              if (text) {
+                return text;
+              } else {
+                throw new Error("Invalid API response structure or no content generated.");
+              }
+
+            } catch (error) {
+              console.error("Gemini API Call Error:", error);
+              retries--;
+              if (retries === 0) {
+                throw new Error("API request failed after multiple retries.");
+              }
+              await new Promise(resolve => setTimeout(resolve, delay));
+              delay *= 2; // Exponential backoff
+            }
+          }
+        }
+
+        // --- Main App Component ---
+        function App() {
+          const [imageBase64, setImageBase64] = useState(null); // Base64 data for API
+          const [imagePreview, setImagePreview] = useState(null); // URL for <img> src
+          const [imageMimeType, setImageMimeType] = useState('image/png');
+          
+          const [summary, setSummary] = useState("");
+          const [terraformCode, setTerraformCode] = useState("");
+          const [resultType, setResultType] = useState(null); // 'network', 'fruit', 'general'
+
+          const [isLoading, setIsLoading] = useState(false);
+          const [error, setError] = useState(null);
+          const [activeTab, setActiveTab] = useState('summary');
+          
+          // Camera/Scanning States
+          const [isScanning, setIsScanning] = useState(false);
+          const [mediaStream, setMediaStream] = useState(null);
+          const videoRef = useRef(null);
+          const canvasRef = useRef(null);
+
+          // --- Input Handling (File Upload) ---
+          const handleFileChange = (e) => {
+            const file = e.target.files[0];
+            if (file) {
+              stopScan(); // Ensure camera stops if starting from a scan state
+              resetState();
+
+              // Clear old preview if any
+              if (imagePreview) URL.revokeObjectURL(imagePreview);
+              
+              setImageMimeType(file.type);
+              setImagePreview(URL.createObjectURL(file));
+
+              const reader = new FileReader();
+              reader.onloadend = () => {
+                const base64Data = reader.result.split(',')[1];
+                setImageBase64(base64Data);
+              };
+              reader.onerror = () => setError("Failed to read the image file.");
+              reader.readAsDataURL(file);
+            }
+          };
+          
+          // --- Input Handling (Live Scan) ---
+          const startScan = async () => {
+            resetState();
+            setIsScanning(true);
+            setError(null);
+            
+            try {
+              const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+              if (videoRef.current) {
+                videoRef.current.srcObject = stream;
+                setMediaStream(stream);
+              }
+            } catch (err) {
+              console.error("Camera access denied:", err);
+              setError("Cannot access camera. Please ensure permissions are granted or use file upload.");
+              setIsScanning(false);
+            }
+          };
+
+          const stopScan = () => {
+            if (mediaStream) {
+              mediaStream.getTracks().forEach(track => track.stop());
+              setMediaStream(null);
+            }
+            setIsScanning(false);
+          };
+
+          const captureImage = () => {
+            if (!videoRef.current || !canvasRef.current) {
+              setError("Video feed or canvas not ready.");
+              return;
+            }
+            
+            const video = videoRef.current;
+            const canvas = canvasRef.current;
+            
+            // Set canvas dimensions to match video stream
+            const ratio = video.videoWidth / video.videoHeight;
+            const targetHeight = 400; // Arbitrary target size for better API processing
+            const targetWidth = targetHeight * ratio;
+
+            canvas.width = targetWidth;
+            canvas.height = targetHeight;
+
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
+            
+            stopScan(); // Stop camera after capture
+            
+            // Get data URL
+            const dataUrl = canvas.toDataURL('image/png');
+            setImageMimeType('image/png');
+            setImagePreview(dataUrl);
+            setImageBase64(dataUrl.split(',')[1]);
+          };
+
+          // --- Cleanup on Unmount ---
+          useEffect(() => {
+              return () => {
+                  stopScan();
+                  if (imagePreview) URL.revokeObjectURL(imagePreview);
+              };
+          }, []); 
+
+          // --- Reset State ---
+          const resetState = () => {
+            setSummary("");
+            setTerraformCode("");
+            setResultType(null);
+            setImagePreview(null);
+            setImageBase64(null);
+            setError(null);
+          };
+          
+          // --- Main Analysis Logic ---
+          const handleAnalysis = async () => {
+            if (!imageBase64) {
+              setError("Please capture or upload an image first.");
+              return;
+            }
+
+            setIsLoading(true);
+            setError(null);
+            setSummary("");
+            setTerraformCode("");
+            setResultType(null);
+
+            try {
+              // 1. CLASSIFICATION STEP
+              const classificationPrompt = `
+                Analyze the attached image. Is it a conceptual computer network diagram, a picture of a single or multiple fruits, or something else? 
+                Respond *only* with one of the following exact keywords: NETWORK_DIAGRAM, FRUIT, or OTHER.
+              `;
+              
+              const classificationPayload = {
+                contents: [{ role: "user", parts: [
+                      { text: classificationPrompt },
+                      { inlineData: { mimeType: imageMimeType, data: imageBase64 } }
+                  ] }],
+              };
+              
+              let classificationText = await callGeminiApi(classificationPayload);
+              const classification = classificationText.trim().toUpperCase();
+              
+              // 2. BRANCHING AND SECONDARY ANALYSIS
+              let analysisText = "";
+              let newResultType = 'general';
+              let terraformCodeText = "";
+
+              switch (classification) {
+                case 'FRUIT':
+                  newResultType = 'fruit';
+                  setActiveTab('summary');
+                  const fruitPrompt = `
+                    You are a food inventory specialist. Analyze the fruit in the image.
+                    1. Identify the fruit type (e.g., 'Ripe Banana', 'Fresh Apple').
+                    2. Estimate its remaining shelf life in days under normal stock conditions.
+                    Format the response as follows: **Type:** [Fruit Name]\n**Stock Days Remaining:** [Number of Days] days\n**Analysis:** [Brief 2-3 sentence analysis of its freshness and readiness for consumption.]
+                  `;
+                  analysisText = await callGeminiApi({
+                      contents: [{ role: "user", parts: [
+                          { text: fruitPrompt },
+                          { inlineData: { mimeType: imageMimeType, data: imageBase64 } }
+                      ] }]
+                  });
+                  break;
+
+                case 'NETWORK_DIAGRAM':
+                  newResultType = 'network';
+                  setActiveTab('summary');
+                  // STEP 2a: Generate Architecture Summary
+                  const summaryPrompt = `
+                    Analyze this network diagram. 
+                    1. Identify all components and the inferred cloud provider (e.g., AWS, Azure, GCP, or "Generic").
+                    2. Provide a concise, bullet-pointed summary of the architecture.
+                  `;
+                  
+                  const summaryText = await callGeminiApi({
+                      contents: [{ role: "user", parts: [
+                          { text: summaryPrompt },
+                          { inlineData: { mimeType: imageMimeType, data: imageBase64 } }
+                      ] }]
+                  });
+                  analysisText = summaryText;
+
+                  // STEP 2b: Generate Terraform Code
+                  const terraformPrompt = `
+                    Based on the architecture summary below, generate a complete 'main.tf' Terraform HCL code block to provision this infrastructure.
+                    - Use the cloud provider mentioned in the summary (default to AWS if unspecified).
+                    - Only output the HCL code itself, with no surrounding text or markdown wrappers.
+
+                    Summary:
+                    ${summaryText}
+                  `;
+                  
+                  terraformCodeText = await callGeminiApi({
+                      contents: [{ parts: [{ text: terraformPrompt }] }]
+                  });
+                  terraformCodeText = terraformCodeText.replace(/^```hcl\n?/, '').replace(/\n?```$/, '');
+                  setTerraformCode(terraformCodeText);
+                  break;
+
+                default: // OTHER
+                  newResultType = 'general';
+                  setActiveTab('summary');
+                  const generalPrompt = `
+                    Provide a concise, 3-4 sentence general analysis and description of the image.
+                  `;
+                  analysisText = await callGeminiApi({
+                      contents: [{ role: "user", parts: [
+                          { text: generalPrompt },
+                          { inlineData: { mimeType: imageMimeType, data: imageBase64 } }
+                      ] }]
+                  });
+              }
+
+              setSummary(analysisText);
+              setResultType(newResultType);
+
+            } catch (err) {
+              console.error(err);
+              const errorMessage = err.message || "An unknown error occurred.";
+              setError(errorMessage.includes("API Key is missing") ? errorMessage : "An API error occurred: " + errorMessage);
+              setResultType(null); // Clear result type on error
+            } finally {
+              setIsLoading(false);
+            }
+          };
+
+          /**
+           * Copies the generated Terraform code to the clipboard.
+           */
+          const copyToClipboard = () => {
+            const el = document.createElement('textarea');
+            el.value = terraformCode;
+            el.setAttribute('readonly', '');
+            el.style.position = 'absolute';
+            el.style.left = '-9999px';
+            document.body.appendChild(el);
+            el.select();
+            
+            let success = false;
+            try {
+              success = document.execCommand('copy');
+            } catch (err) {
+              console.error('Failed to copy text:', err);
+            }
+            document.body.removeChild(el);
+            
+            if (success) {
+                setError("Code copied to clipboard!"); 
+                setTimeout(() => setError(null), 3000); 
+            } else {
+                setError("Failed to copy code. Please copy manually.");
+            }
+          };
+
+          // --- Render JSX ---
+          const isNetworkResult = resultType === 'network';
+          const isFruitResult = resultType === 'fruit';
+
+          return (
+            <div className="flex flex-col md:flex-row h-full bg-gray-100">
+              {/* Left Panel: Input & Controls */}
+              <div className="w-full md:w-1/2 lg:w-2/5 p-6 bg-white shadow-lg overflow-y-auto custom-scrollbar">
+                <header className="mb-6">
+                  <h1 className="text-3xl font-bold text-gray-800">AI Multi-Modal Analyzer</h1>
+                  <p className="text-md text-gray-600 mt-1">
+                    Analyze fruits for inventory, generate Terraform code from diagrams, or describe any image.
+                  </p>
+                </header>
+
+                {/* Input Method Switch */}
+                <div className="flex space-x-3 mb-6">
+                    <button
+                        onClick={() => { stopScan(); setIsScanning(false); }}
+                        className={`flex-1 py-2 px-4 rounded-lg font-semibold transition-colors text-sm
+                            ${!isScanning ? 'bg-indigo-600 text-white shadow-md' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
+                    >
+                        File Upload
+                    </button>
+                    <button
+                        onClick={startScan}
+                        disabled={isScanning && mediaStream}
+                        className={`flex-1 py-2 px-4 rounded-lg font-semibold transition-colors text-sm
+                            ${isScanning ? 'bg-indigo-600 text-white shadow-md' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
+                    >
+                        {isScanning ? 'Camera Active...' : 'Live Scan (Camera)'}
+                    </button>
+                </div>
+
+                {/* Conditional Input Area */}
+                {isScanning ? (
+                    <div className="mb-4">
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Live Video Feed</label>
+                        <div className="camera-view mb-4">
+                            <video ref={videoRef} autoPlay playsInline className="rounded-lg" />
+                        </div>
+                        <button
+                            onClick={captureImage}
+                            disabled={!mediaStream}
+                            className={`w-full py-2 px-4 rounded-lg text-white font-semibold transition-colors text-sm
+                                        ${!mediaStream ? 'bg-gray-400 cursor-not-allowed' : 'bg-green-600 hover:bg-green-700 shadow-md'}`}
+                        >
+                            Capture Image
+                        </button>
+                        {/* Hidden canvas for image capture */}
+                        <canvas ref={canvasRef} style={{ display: 'none' }} />
+                    </div>
+                ) : (
+                    <div className="mb-4">
+                        <label htmlFor="file-upload" className="block text-sm font-medium text-gray-700 mb-2">Select Image File</label>
+                        <input 
+                            id="file-upload"
+                            type="file"
+                            accept="image/png, image/jpeg, image/webp"
+                            onChange={handleFileChange}
+                            className="block w-full text-sm text-gray-500
+                                       file:mr-4 file:py-2 file:px-4
+                                       file:rounded-lg file:border-0
+                                       file:text-sm file:font-semibold
+                                       file:bg-indigo-50 file:text-indigo-700
+                                       hover:file:bg-indigo-100
+                                       cursor-pointer"
+                        />
+                    </div>
+                )}
+
+
+                {/* Image Preview */}
+                {imagePreview && (
+                  <div className="mb-6 border border-gray-200 rounded-lg p-2 bg-gray-50">
+                    <p className="text-xs text-gray-500 mb-1">Image to be analyzed:</p>
+                    <img 
+                      src={imagePreview} 
+                      alt="Captured or uploaded image preview" 
+                      className="w-full h-auto max-h-80 object-contain rounded" 
+                      onError={(e) => { e.target.onerror = null; e.target.src = "https://placehold.co/300x200/cccccc/333333?text=Image+Load+Error"; }}
+                    />
+                  </div>
+                )}
+
+                {/* Action Button */}
+                <button
+                  onClick={handleAnalysis}
+                  disabled={isLoading || !imageBase64}
+                  className={`w-full py-3 px-4 rounded-lg text-white font-semibold transition-all
+                              ${(isLoading || !imageBase64) 
+                                ? 'bg-gray-400 cursor-not-allowed' 
+                                : 'bg-indigo-600 hover:bg-indigo-700 shadow-md'}`}
+                >
+                  {isLoading ? (
+                    <div className="flex items-center justify-center">
+                      <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                      </svg>
+                      Analyzing...
+                    </div>
+                  ) : (
+                    'Analyze Image'
+                  )}
+                </button>
+              </div>
+
+              {/* Right Panel: Output */}
+              <div className="w-full md:w-1/2 lg:w-3/5 p-6 overflow-y-auto custom-scrollbar flex flex-col">
+                {/* Error/Success Message */}
+                {error && (
+                  <div className={`px-4 py-3 mb-4 rounded-lg relative ${error.includes("copied") ? 'bg-green-100 border-green-400 text-green-700' : 'bg-red-100 border-red-400 text-red-700'}`} role="alert">
+                    <strong className="font-bold">{error.includes("copied") ? "Success: " : "Error: "}</strong>
+                    <span className="block sm:inline">{error}</span>
+                  </div>
+                )}
+
+                {/* Loading State Placeholder */}
+                {isLoading && !summary && (
+                  <div className="flex items-center justify-center flex-grow">
+                    <div className="text-center">
+                      <svg className="animate-spin h-12 w-12 text-indigo-600 mx-auto" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                      </svg>
+                      <p className="text-lg text-gray-600 mt-4">Running AI analysis, classifying image type...</p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Results Area */}
+                {resultType && !isLoading && (
+                  <div className="bg-white p-0 rounded-lg shadow-inner flex flex-col flex-grow">
+                    {/* Tabs */}
+                    <div className="border-b border-gray-200 p-6 pb-0">
+                      <nav className="-mb-px flex space-x-6" aria-label="Tabs">
+                        <button
+                          onClick={() => setActiveTab('summary')}
+                          className={`py-3 px-1 border-b-2 font-medium text-sm transition-colors
+                                      ${activeTab === 'summary' 
+                                        ? 'border-indigo-500 text-indigo-600' 
+                                        : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}`}
+                        >
+                          {isNetworkResult ? 'Architecture Summary' : isFruitResult ? 'Fruit Inventory Analysis' : 'General Analysis'}
+                        </button>
+                        {isNetworkResult && (
+                            <button
+                              onClick={() => setActiveTab('code')}
+                              className={`py-3 px-1 border-b-2 font-medium text-sm transition-colors
+                                          ${activeTab === 'code' 
+                                            ? 'border-indigo-500 text-indigo-600' 
+                                            : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}`}
+                            >
+                              Terraform Code
+                            </button>
+                        )}
+                      </nav>
+                    </div>
+
+                    {/* Tab Content */}
+                    <div className="p-6 flex-grow overflow-y-auto custom-scrollbar">
+                      {/* Analysis Panel (Summary/Fruit/General) */}
+                      {activeTab === 'summary' && (
+                        <div className="relative">
+                            <h2 className="text-xl font-bold mb-3 text-gray-700">
+                                Analyzed as: <span className="text-indigo-600">{resultType.toUpperCase().replace('_', ' ')}</span>
+                            </h2>
+                            <div 
+                              className="prose prose-indigo max-w-none whitespace-pre-wrap"
+                              dangerouslySetInnerHTML={{ __html: summary.replace(/\n/g, '<br />') }} // Simple formatting
+                            />
+                        </div>
+                      )}
+
+                      {/* Code Panel */}
+                      {activeTab === 'code' && isNetworkResult && (
+                        <div className="relative h-full">
+                          <button
+                            onClick={copyToClipboard}
+                            className="absolute top-0 right-0 z-10 bg-gray-700 text-white text-xs font-semibold py-1 px-3 rounded-md hover:bg-gray-600 transition-colors"
+                          >
+                            Copy Code
+                          </button>
+                          <pre className="bg-gray-900 text-gray-100 p-4 rounded-lg overflow-x-auto h-full min-h-[300px]">
+                            <code className="font-mono text-sm">
+                              {terraformCode || "Code generation failed or is in progress..."}
+                            </code>
+                          </pre>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        }
+
+        // --- Render the App ---
+        const rootElement = document.getElementById('root');
+        if (rootElement) {
+            ReactDOM.createRoot(rootElement).render(<App />);
+        }
+    </script>
+</body>
+</html>
