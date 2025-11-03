@@ -13,8 +13,10 @@ const Utensils = (props) => (<svg xmlns="http://www.w3.org/2000/svg" width="24" 
 
 // Configuration for API and Firebase (required by environment)
 // NOTE: For Vercel deployment, you must set the API key as an environment variable (e.g., REACT_APP_GEMINI_API_KEY)
-const apiKey = "AIzaSyCoKqpcbIxcq1YniE7DQggJ5fEhAs2SOYc";
+//const apiKey = "AIzaSyCoKqpcbIxcq1YniE7DQggJ5fEhAs2SOYc";
+const apiKey = process.env.REACT_APP_GEMINI_API_KEY || "";
 const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+// In ImageAnalyzerApp.jsx:
 
 // The specific JSON schema the model must adhere to for structured output
 const responseSchema = {
