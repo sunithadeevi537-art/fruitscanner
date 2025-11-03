@@ -1,0 +1,609 @@
+import React, { useState, useCallback, useRef, useEffect } from 'react';
+
+// --- Icon Definitions using Lucide-React equivalent SVGs ---
+const Camera = (props) => (<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...props}><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg>);
+const Upload = (props) => (<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...props}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg>);
+const Zap = (props) => (<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...props}><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>);
+const Code = (props) => (<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...props}><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>);
+const RefreshCw = (props) => (<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...props}><path d="M21 12A9 9 0 0 0 6 5.3v-3a1 1 0 0 0-2 0v5a1 1 0 0 0 1 1h5a1 1 0 0 0 0-2H5.3A7 7 0 1 1 3 12a1 1 0 0 0 2 0"/><path d="M10 12A9 9 0 0 1 18 18.7v3a1 1 0 0 0 2 0v-5a1 1 0 0 0-1-1h-5a1 1 0 0 0 0 2h4.7A7 7 0 1 1 21 12a1 1 0 0 0-2 0"/></svg>);
+const Loader = (props) => (<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...props}><path d="M12 2v4"/><path d="m16.2 7.8 2.8-2.8"/><path d="M18 12h4"/><path d="m16.2 16.2 2.8 2.8"/><path d="M12 18v4"/><path d="m7.8 16.2-2.8 2.8"/><path d="M6 12H2"/><path d="m7.8 7.8-2.8-2.8"/></svg>);
+const Wheat = (props) => (<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...props}><path d="M2 22s1-2 5-2 5 2 5 2V4c0-2-1.5-3-3-3-1.5 0-3 1-3 3v16"/><path d="M15 5.5a3.5 3.5 0 1 1 3.5 3.5v10.5"/><path d="M18.5 9a3.5 3.5 0 1 1 3.5 3.5V22"/></svg>);
+const Utensils = (props) => (<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...props}><path d="M3 2v7c0 1.1.9 2 2 2h4c1.1 0 2-.9 2-2V2"/><path d="M7 11v10"/><path d="M21 15V2l-7 7.025V22"/></svg>);
+// --- End Icon Definitions ---
+
+// Configuration for API and Firebase (required by environment)
+// NOTE: For Vercel deployment, you must set the API key as an environment variable (e.g., REACT_APP_GEMINI_API_KEY)
+const apiKey = "";
+const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+
+// The specific JSON schema the model must adhere to for structured output
+const responseSchema = {
+    type: "OBJECT",
+    properties: {
+        classification: {
+            type: "STRING",
+            description: "The primary classification. Must be one of: 'NETWORK_DIAGRAM', 'FRUIT', 'PULSES', 'GENERAL'."
+        },
+        summary: {
+            type: "STRING",
+            description: "A detailed textual analysis, inventory report, or architecture summary. Must contain structured markdown for PULSES/FRUIT/GENERAL reports, or a bulleted summary for NETWORK_DIAGRAM. For PULSES, this MUST be a single Markdown Table."
+        },
+        terraformCode: {
+            type: "STRING",
+            description: "The generated Terraform HCL code block (only for NETWORK_DIAGRAM, otherwise an empty string)."
+        },
+        subCategory: {
+            type: "STRING",
+            description: "A specific sub-category for the item (e.g., 'Lentil', 'Apple', 'Electronic Item', 'AWS', 'Pasta Dish')."
+        }
+    },
+    required: ["classification", "summary", "terraformCode", "subCategory"]
+};
+
+// --- Helper Functions ---
+
+// Exponential Backoff Fetch
+const fetchWithRetry = async (url, options, maxRetries = 5) => {
+    for (let i = 0; i < maxRetries; i++) {
+        try {
+            const response = await fetch(url, options);
+            if (response.ok) {
+                return response;
+            }
+            // For non-2xx responses, throw error and trigger retry
+            throw new Error(`HTTP error! status: ${response.status}`);
+        } catch (error) {
+            if (i === maxRetries - 1) throw error;
+            const delay = Math.pow(2, i) * 1000 + Math.floor(Math.random() * 1000);
+            await new Promise(resolve => setTimeout(resolve, delay));
+        }
+    }
+};
+
+// --- Main Application Component ---
+
+const App = () => {
+    // --- State Management ---
+    const [capturedImageBase64, setCapturedImageBase64] = useState(null);
+    const [results, setResults] = useState(null);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState(null);
+    const [isCameraActive, setIsCameraActive] = useState(false);
+    const [inputMode, setInputMode] = useState('upload'); // 'upload' or 'camera'
+    const [activeResultTab, setActiveResultTab] = useState('summary'); // 'summary' or 'code'
+    const videoRef = useRef(null);
+    const streamRef = useRef(null);
+
+    // --- Camera Control ---
+
+    const startCamera = useCallback(async () => {
+        setError(null);
+        try {
+            // Requesting 'environment' (rear) camera if available
+            const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+            streamRef.current = stream;
+            if (videoRef.current) {
+                videoRef.current.srcObject = stream;
+            }
+            setIsCameraActive(true);
+        } catch (err) {
+            console.error("Error accessing camera:", err);
+            setError("Cannot access camera. Please check permissions.");
+            setIsCameraActive(false);
+        }
+    }, []);
+
+    const stopCamera = useCallback(() => {
+        if (streamRef.current) {
+            streamRef.current.getTracks().forEach(track => track.stop());
+            streamRef.current = null;
+        }
+        setIsCameraActive(false);
+    }, []);
+
+    const handleInputModeChange = (mode) => {
+        setCapturedImageBase64(null);
+        setResults(null);
+        setError(null);
+        setInputMode(mode);
+        if (mode === 'camera') {
+            startCamera();
+        } else {
+            stopCamera();
+        }
+    };
+
+    // Clean up camera stream when component unmounts or mode changes
+    useEffect(() => {
+        return () => {
+            stopCamera();
+        };
+    }, [stopCamera]);
+
+    const handleCaptureImage = () => {
+        if (!videoRef.current) return;
+
+        const video = videoRef.current;
+        const canvas = document.createElement('canvas');
+        // Use the video's intrinsic size for the canvas
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+        stopCamera();
+
+        // Convert canvas content to base64
+        const base64Data = canvas.toDataURL('image/jpeg', 0.9).split(',')[1];
+        setCapturedImageBase64(base64Data);
+    };
+
+    const handleFileChange = (event) => {
+        setError(null);
+        setResults(null);
+        setCapturedImageBase64(null);
+
+        const file = event.target.files[0];
+        if (file) {
+            if (!file.type.startsWith('image/')) {
+                setError("Please select a valid image file.");
+                return;
+            }
+
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                const base64Data = e.target.result.split(',')[1];
+                setCapturedImageBase64(base64Data);
+            };
+            reader.readAsDataURL(file);
+        }
+    };
+
+    // --- Gemini API Call ---
+
+    const analyzeImage = useCallback(async () => {
+        if (!capturedImageBase64) {
+            setError("Please capture or select an image first.");
+            return;
+        }
+
+        setLoading(true);
+        setResults(null);
+        setError(null);
+
+        // System prompt instructing the model on classification and structured output
+        const systemPrompt = `You are an AI Multi-Modal Analyzer. Your task is to analyze the user-provided image.
+        First, classify the image into one of four primary categories: 'NETWORK_DIAGRAM', 'FRUIT', 'PULSES', or 'GENERAL'.
+        Then, provide a detailed analysis based on the category, following the output rules described in the JSON schema.
+
+        Detailed analysis rules:
+        - For 'NETWORK_DIAGRAM':
+            1. Identify the **Cloud Provider** (e.g., AWS, GCP, Azure, Oracle, Alibaba, or Generic).
+            2. Generate a detailed, bulleted summary of all identified cloud components (e.g., Networks, Subnets, Compute Instances, Databases, Load Balancers) and their relationships.
+            3. Then, in the 'terraformCode' field, output a complete, runnable Terraform HCL code block for the **identified Cloud Provider**. This code MUST include the necessary provider block (e.g., 'aws', 'google', 'azurerm', etc.) and basic variable definitions at the start, followed by resource definitions for the architecture shown in the diagram. **Ensure the HCL is valid and executable and uses the correct provider syntax.**
+            4. Set the 'subCategory' to the name of the identified provider (e.g., 'AWS', 'GCP', 'Azure').
+        
+        - For 'PULSES' (Grains, Legumes, Beans):
+            1. Identify the specific **type of pulse** (e.g., 'Red Lentil', 'Black Bean', 'Chickpea', 'Mung Bean'). Set this as the 'subCategory'.
+            2. Generate a single, comprehensive **Markdown Table** in the 'summary' field. The table should have two columns: 'Parameter' and 'Value'.
+            3. The table MUST include the following parameters in order:
+                a. **Identification:** (Type, Variety, Estimated Size/Weight).
+                b. **Quality & Purity Assessment:** (Observed Foreign Matter, Defects/Damage percentage, Uniformity of Size, Estimated Moisture Level - if visual cues allow).
+                c. **Overall Quality Assessment:** (e.g., 'High Purity', 'Moderate Quality').
+                d. **Key Nutrition Facts (per 100g serving):** (Estimated Protein, Estimated Fiber, Estimated Carbs, Estimated Calories, Key Minerals/Vitamins).
+        
+        - For 'FRUIT': Identify the type of fruit, analyze its condition (e.g., ripeness, bruising), and provide a shelf-life estimate in days. The 'summary' should be a concise inventory report. Set 'subCategory' to the type of fruit (e.g., 'Apple', 'Banana').
+        
+        - For 'GENERAL': Classify the image into a sub-category ('Cooked Food', 'Electronic Item', 'Plant', 'Animal', 'Scene', or 'Manmade Object'). Provide an analysis summary based on the relevant parameters for that sub-category. The sub-category must be placed in the 'subCategory' field.
+            - If the sub-category is **'Cooked Food'** (e.g., pasta, curry, dish), the 'summary' must be a structured markdown list containing:
+                a. **Dish Name & Ingredients (estimated):** (e.g., 'Pasta Alfredo', 'Tomato, Cheese, Basil, Chicken').
+                b. **Nutrition Estimate (per serving):** (Estimated Calories, Protein, Carbs, Fat).
+                c. **Detailed Cooking Process/Recipe:** (step-by-step instructions for a typical preparation of this dish).
+                d. **Allergen Alert:** (If potential allergens like nuts, gluten, or dairy are visible or commonly present).
+        
+        The analysis MUST be returned as a single JSON object conforming exactly to the provided schema.`;
+
+
+        const payload = {
+            contents: [
+                {
+                    role: "user",
+                    parts: [
+                        { text: "Analyze this image and provide the results in the requested JSON format." },
+                        {
+                            inlineData: {
+                                mimeType: "image/jpeg", // Assuming JPEG
+                                data: capturedImageBase64
+                            }
+                        }
+                    ]
+                }
+            ],
+            systemInstruction: {
+                parts: [{ text: systemPrompt }]
+            },
+            generationConfig: {
+                responseMimeType: "application/json",
+                responseSchema: responseSchema
+            }
+        };
+
+        try {
+            const response = await fetchWithRetry(apiUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            const result = await response.json();
+            const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
+
+            if (jsonText) {
+                try {
+                    const parsedResults = JSON.parse(jsonText);
+                    setResults(parsedResults);
+                    // Default to summary view for non-code results
+                    setActiveResultTab('summary'); 
+                } catch (e) {
+                    console.error("Failed to parse JSON response:", jsonText, e);
+                    setError("Analysis failed: Received non-JSON output from AI. Please try a clearer image.");
+                }
+            } else {
+                setError("Analysis failed: Could not get a valid response from the AI model.");
+            }
+
+        } catch (err) {
+            console.error("API Call Error:", err);
+            setError(`Network or API error: ${err.message}. Check your connection or API key setup.`);
+        } finally {
+            setLoading(false);
+        }
+    }, [capturedImageBase64]);
+
+    // --- UI Rendering Helpers ---
+
+    const renderResultTabs = () => {
+        if (!results || results.classification !== 'NETWORK_DIAGRAM') return null;
+
+        return (
+            <div className="flex space-x-2 border-b border-gray-200 px-4 pt-2">
+                <button
+                    onClick={() => setActiveResultTab('summary')}
+                    className={`py-2 px-4 rounded-t-lg transition-colors font-medium ${activeResultTab === 'summary' ? 'text-indigo-600 border-b-2 border-indigo-600' : 'text-gray-500 hover:text-gray-700'}`}
+                >
+                    Architecture Summary
+                </button>
+                <button
+                    onClick={() => setActiveResultTab('code')}
+                    className={`py-2 px-4 rounded-t-lg transition-colors font-medium ${activeResultTab === 'code' ? 'text-indigo-600 border-b-2 border-indigo-600' : 'text-gray-500 hover:text-gray-700'}`}
+                >
+                    <Code className="inline-block w-4 h-4 mr-1 mb-0.5" /> Terraform HCL
+                </button>
+            </div>
+        );
+    };
+
+    const renderResultContent = () => {
+        if (loading) {
+            return (
+                <div className="flex flex-col items-center justify-center p-8 bg-white/50 rounded-xl shadow-inner">
+                    <Loader className="w-8 h-8 animate-spin text-indigo-500" />
+                    <p className="mt-4 text-gray-700 font-medium">Analyzing image, please wait...</p>
+                </div>
+            );
+        }
+
+        if (error) {
+            return (
+                <div className="p-4 bg-red-100 border border-red-400 text-red-700 rounded-xl">
+                    <p className="font-bold">Error:</p>
+                    <p>{error}</p>
+                </div>
+            );
+        }
+
+        if (!results) {
+            return (
+                <div className="p-8 text-center text-gray-500 bg-white/50 rounded-xl shadow-inner">
+                    Upload an image or capture a photo to begin the multi-modal analysis.
+                </div>
+            );
+        }
+
+        const isNetwork = results.classification === 'NETWORK_DIAGRAM';
+        const isPulses = results.classification === 'PULSES';
+        const isCookedFood = results.classification === 'GENERAL' && results.subCategory === 'Cooked Food';
+
+        if (activeResultTab === 'summary' || !isNetwork) {
+            let title = 'General Analysis';
+            let icon = <Zap className="w-5 h-5 mr-2" />;
+
+            if (isNetwork) {
+                title = 'Architecture Summary';
+                icon = <Code className="w-5 h-5 mr-2" />;
+            } else if (results.classification === 'FRUIT') {
+                title = 'Inventory Analysis (Fruit)';
+                icon = <RefreshCw className="w-5 h-5 mr-2" />; 
+            } else if (isPulses) {
+                title = 'Pulse & Grain Analysis';
+                icon = <Wheat className="w-5 h-5 mr-2" />;
+            } else if (isCookedFood) {
+                title = 'Dish Analysis & Recipe';
+                icon = <Utensils className="w-5 h-5 mr-2" />;
+            }
+
+            // A helper component to render basic markdown content (tables, lists, paragraphs)
+            const MarkdownRenderer = ({ content }) => {
+                // Basic replacement for lists and tables to ensure they render correctly in HTML
+                // This is a minimal implementation, for full markdown support a library would be needed.
+                let htmlContent = content;
+                
+                // Replace markdown table syntax with minimal HTML table structure
+                if (isPulses && content.includes('|')) {
+                    const lines = content.split('\n').filter(line => line.trim() !== '');
+                    if (lines.length >= 2 && lines[0].startsWith('|') && lines[1].startsWith('|---')) {
+                        const header = lines[0].replace(/\|/g, '').trim().split(' ').filter(c => c);
+                        const body = lines.slice(2);
+                        
+                        let tableHtml = '<table><thead><tr>';
+                        header.forEach(h => tableHtml += `<th>${h}</th>`);
+                        tableHtml += '</tr></thead><tbody>';
+
+                        body.forEach(line => {
+                            const cells = line.replace(/\|/g, '@@@').split('@@@').map(c => c.trim()).filter(c => c !== '');
+                            if (cells.length === header.length) {
+                                tableHtml += '<tr>';
+                                cells.forEach(c => tableHtml += `<td>${c}</td>`);
+                                tableHtml += '</tr>';
+                            }
+                        });
+                        tableHtml += '</tbody></table>';
+                        htmlContent = tableHtml;
+                    }
+                }
+                
+                // General replacements (newlines to breaks)
+                htmlContent = htmlContent.replace(/\n/g, '<br/>');
+
+                // Basic list rendering (imperfect without full markdown parser)
+                htmlContent = htmlContent.replace(/<br\/>\* /g, '<ul><li>').replace(/\* /g, '</li><li>').replace(/<ul><li>/, '<ul><li>').replace(/<br\/>/g, '</li></ul><p>').replace(/<ul><li>(.*?)<\/li><\/ul><p>/g, '<ul><li>$1</li></ul>');
+                
+                return <div dangerouslySetInnerHTML={{ __html: htmlContent }} />;
+            };
+
+
+            return (
+                <div className="p-4 bg-white rounded-b-xl overflow-auto text-sm">
+                    <h3 className="text-lg font-semibold mb-2 flex items-center text-gray-900">
+                        {icon} {title}
+                    </h3>
+                    {/* Display subCategory for all */}
+                    {results.subCategory && (
+                        <p className="mb-3 text-indigo-600 font-medium border-b pb-1">
+                            {isNetwork ? 'Cloud Provider:' : 'Subject:'} <span className="font-bold">{results.subCategory}</span>
+                        </p>
+                    )}
+                    <div className="prose max-w-none text-gray-700">
+                        <MarkdownRenderer content={results.summary} />
+                    </div>
+                </div>
+            );
+        }
+
+        if (activeResultTab === 'code' && isNetwork) {
+            return (
+                <div className="p-4 bg-gray-900 rounded-b-xl text-white font-mono text-xs overflow-x-auto relative">
+                    <button
+                        onClick={() => {
+                            // Copy to clipboard using the execCommand fallback
+                            const textarea = document.createElement('textarea');
+                            textarea.value = results.terraformCode;
+                            document.body.appendChild(textarea);
+                            textarea.select();
+                            document.execCommand('copy');
+                        }}
+                        className="absolute top-2 right-2 p-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs transition-colors"
+                        title="Copy to Clipboard"
+                    >
+                        Copy Code
+                    </button>
+                    <pre className="whitespace-pre-wrap mt-6 text-yellow-300">
+                        {results.terraformCode || "No Terraform code was generated for this architecture."}
+                    </pre>
+                </div>
+            );
+        }
+
+        return null;
+    };
+
+    // --- Main JSX Return ---
+
+    return (
+        <div className="min-h-screen bg-gray-50 p-4 font-sans antialiased flex justify-center">
+            {/* Custom styles for the markdown renderer (Tables and Lists) */}
+            <style jsx="true">{`
+                /* Ensure all elements use Inter font */
+                * {
+                    font-family: 'Inter', sans-serif;
+                }
+                
+                /* Custom styles for Markdown Tables to make them look nice with Tailwind classes */
+                .prose table {
+                    width: 100%;
+                    border-collapse: separate;
+                    border-spacing: 0;
+                    margin-top: 1rem;
+                    box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+                    border-radius: 0.5rem;
+                    overflow: hidden;
+                }
+                .prose th, .prose td {
+                    padding: 12px 15px;
+                    text-align: left;
+                    border-bottom: 1px solid #e5e7eb;
+                }
+                .prose th {
+                    background-color: #e0f2f1; /* Tailwind teal-100 */
+                    font-weight: 600;
+                    color: #1f2937; /* Tailwind gray-800 */
+                    text-transform: uppercase;
+                    font-size: 0.75rem;
+                }
+                .prose tr:nth-child(even) {
+                    background-color: #f9fafb; /* Light stripe */
+                }
+                .prose tr:hover {
+                    background-color: #f3f4f6;
+                }
+                .prose table tr:last-child td {
+                    border-bottom: none;
+                }
+                .prose table thead tr:first-child th:first-child {
+                    border-top-left-radius: 0.5rem;
+                }
+                .prose table thead tr:first-child th:last-child {
+                    border-top-right-radius: 0.5rem;
+                }
+                
+                /* List rendering fix for simple implementation */
+                .prose ul {
+                    list-style: disc;
+                    margin-left: 20px;
+                    padding: 0;
+                }
+                .prose li {
+                    margin-bottom: 5px;
+                }
+            `}</style>
+
+            <div className="w-full max-w-4xl space-y-6">
+                <header className="text-center py-6">
+                    <h1 className="text-3xl font-extrabold text-gray-900 flex items-center justify-center">
+                        <Zap className="w-7 h-7 mr-2 text-indigo-600" />
+                        AI Multi-Modal Analyzer
+                    </h1>
+                    <p className="mt-1 text-gray-500">Analyze network diagrams, pulses, food, or any image with Gemini.</p>
+                </header>
+
+                {/* --- Input and Preview Area --- */}
+                <div className="bg-white p-6 rounded-2xl shadow-xl border border-gray-100 grid md:grid-cols-2 gap-6">
+                    {/* Controls */}
+                    <div className="space-y-4">
+                        <div className="flex space-x-3 mb-4">
+                            <button
+                                onClick={() => handleInputModeChange('upload')}
+                                className={`flex items-center px-4 py-2 rounded-xl transition-all font-semibold ${inputMode === 'upload' ? 'bg-indigo-600 text-white shadow-md' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}
+                            >
+                                <Upload className="w-5 h-5 mr-2" /> File Upload
+                            </button>
+                            <button
+                                onClick={() => handleInputModeChange('camera')}
+                                className={`flex items-center px-4 py-2 rounded-xl transition-all font-semibold ${inputMode === 'camera' ? 'bg-indigo-600 text-white shadow-md' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}
+                            >
+                                <Camera className="w-5 h-5 mr-2" /> Live Scan
+                            </button>
+                        </div>
+
+                        {inputMode === 'upload' && (
+                            <div className="border-2 border-dashed border-gray-300 rounded-xl p-6 text-center bg-gray-50">
+                                <Upload className="w-8 h-8 mx-auto text-gray-400 mb-2" />
+                                <label htmlFor="file-upload" className="cursor-pointer font-medium text-indigo-600 hover:text-indigo-500">
+                                    Select Image File
+                                </label>
+                                <input id="file-upload" type="file" accept="image/*" onChange={handleFileChange} className="sr-only" />
+                                <p className="text-xs text-gray-500 mt-1">PNG, JPG, or JPEG</p>
+                            </div>
+                        )}
+
+                        {inputMode === 'camera' && (
+                            <div className="relative border border-gray-300 rounded-xl bg-gray-900 overflow-hidden">
+                                {isCameraActive && (
+                                    <video ref={videoRef} autoPlay playsInline className="w-full rounded-xl object-cover h-64"></video>
+                                )}
+                                {!isCameraActive && (
+                                    <div className="flex items-center justify-center h-64 text-gray-500">
+                                        Camera Stopped. Click 'Live Scan' to restart.
+                                    </div>
+                                )}
+
+                                {isCameraActive && (
+                                    <button
+                                        onClick={handleCaptureImage}
+                                        className="absolute bottom-4 left-1/2 transform -translate-x-1/2 p-3 bg-red-500 hover:bg-red-600 rounded-full shadow-lg transition-transform hover:scale-105"
+                                        title="Capture Image"
+                                    >
+                                        <Camera className="w-6 h-6 text-white" />
+                                    </button>
+                                )}
+                            </div>
+                        )}
+
+                        {(capturedImageBase64 || results) && (
+                            <button
+                                onClick={() => {
+                                    setCapturedImageBase64(null);
+                                    setResults(null);
+                                    setError(null);
+                                    if(inputMode === 'camera') startCamera();
+                                }}
+                                className="w-full flex items-center justify-center px-4 py-2 text-sm font-medium rounded-xl text-red-600 bg-red-50 hover:bg-red-100 transition-colors"
+                                disabled={loading}
+                            >
+                                <RefreshCw className="w-4 h-4 mr-2" /> Reset Image
+                            </button>
+                        )}
+                    </div>
+
+                    {/* Image Preview */}
+                    <div className="relative min-h-[200px] bg-gray-100 rounded-xl flex items-center justify-center border border-gray-200">
+                        {capturedImageBase64 ? (
+                            <img
+                                src={`data:image/jpeg;base64,${capturedImageBase64}`}
+                                alt="Captured or Uploaded Preview"
+                                className="w-full h-full object-contain max-h-96 rounded-xl shadow-inner"
+                            />
+                        ) : (
+                            <p className="text-gray-500 text-center p-4">Image Preview Area</p>
+                        )}
+                        {capturedImageBase64 && (
+                            <button
+                                onClick={analyzeImage}
+                                disabled={loading}
+                                className={`absolute bottom-4 right-4 flex items-center px-4 py-2 rounded-xl transition-all font-bold ${loading ? 'bg-gray-400 text-white cursor-not-allowed' : 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-lg'}`}
+                            >
+                                {loading ? (
+                                    <>
+                                        <Loader className="w-4 h-4 mr-2 animate-spin" /> Analyzing...
+                                    </>
+                                ) : (
+                                    <>
+                                        <Zap className="w-4 h-4 mr-2" /> Analyze Image
+                                    </>
+                                )}
+                            </button>
+                        )}
+                    </div>
+                </div>
+
+                {/* --- Results Area --- */}
+                <div className="bg-white rounded-2xl shadow-xl border border-gray-100 overflow-hidden">
+                    <div className="p-4 bg-indigo-50 border-b border-indigo-100">
+                        <h2 className="text-xl font-bold text-indigo-800">
+                            {results ? (
+                                <>Analyzed as: <span className="text-indigo-600 font-extrabold tracking-wider">{results.classification.replace('_', ' ')}</span></>
+                            ) : (
+                                "Analysis Results"
+                            )}
+                        </h2>
+                    </div>
+
+                    {renderResultTabs()}
+                    {renderResultContent()}
+                </div>
+            </div>
+        </div>
+    );
+};
+
+export default App;
